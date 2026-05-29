@@ -15,9 +15,7 @@ app.use(express.json());
 
 const SHOPEE_API_URL = 'https://open-api.affiliate.shopee.com.br/graphql';
 
-// Limite por página (a API costuma aceitar até 500).
 const PAGE_LIMIT = 500;
-// Trava de segurança contra loop infinito (500 * 200 = 100k pedidos).
 const MAX_PAGES = 200;
 
 function generateSignature(appId, timestamp, payload, secret) {
@@ -55,9 +53,6 @@ async function shopeeFetch(query, appId, secret) {
   return data.data;
 }
 
-// Monta a query de UMA página. Continuamos injetando os valores
-// direto na string (sem usar $variables) pra fugir do erro "wrong type".
-// scrollId é String, então JSON.stringify cuida das aspas/escapes.
 function buildConversionQuery(startTs, endTs, scrollId) {
   const scrollClause = scrollId ? `, scrollId: ${JSON.stringify(scrollId)}` : '';
   return `{
@@ -91,7 +86,8 @@ function buildConversionQuery(startTs, endTs, scrollId) {
 }
 
 // ---------------------------------------------------------------------------
-// Endpoint: Conversões — com PAGINAÇÃO via scrollId
+// Endpoint: Conversões — paginação por scrollId, item fake com itemPrice=0
+// (pra não inflar o GMV no dashboard enquanto não puxamos o item real)
 // ---------------------------------------------------------------------------
 app.post('/api/shopee/conversions', async (req, res) => {
   try {
@@ -125,8 +121,6 @@ app.post('/api/shopee/conversions', async (req, res) => {
 
       console.log(`[Proxy] Página ${pageCount}: +${nodes.length} (acumulado: ${allNodes.length}) | próxima? ${hasNext}`);
 
-      // Se a API diz que tem próxima mas não devolve scrollId, paramos pra
-      // não cair em loop infinito puxando sempre a mesma página.
       if (hasNext && !nextScroll) {
         console.warn('[Proxy] hasNextPage=true mas sem scrollId. Parando por segurança.');
         break;
@@ -134,16 +128,10 @@ app.post('/api/shopee/conversions', async (req, res) => {
       scrollId = nextScroll;
     }
 
-    if (pageCount >= MAX_PAGES && hasNext) {
-      console.warn('[Proxy] Atingiu MAX_PAGES — pode haver dados não buscados.');
-    }
-
-    // Transforma pro formato que o shopeeRepository.js já espera.
-    // Comissões vêm como String — parseFloat em tudo.
     const transformed = allNodes.map(node => {
-      const totalComm  = parseFloat(node.totalCommission   || '0') || 0;
-      const sellerComm = parseFloat(node.sellerCommission  || '0') || 0;
-      const netComm    = parseFloat(node.netCommission     || '0') || 0;
+      const totalComm  = parseFloat(node.totalCommission  || '0') || 0;
+      const sellerComm = parseFloat(node.sellerCommission || '0') || 0;
+      const netComm    = parseFloat(node.netCommission    || '0') || 0;
       const estComm    = parseFloat(node.estimatedTotalCommission || '0') || 0;
 
       return {
@@ -157,18 +145,13 @@ app.post('/api/shopee/conversions', async (req, res) => {
         sellerCommission: sellerComm,
         netCommission:    netComm,
         estimatedCommission: estComm,
-        // A API não tem "subId1" nesse nó. O melhor proxy disponível é o
-        // utmContent (onde o link de afiliado costuma carregar o sub_id).
-        // Se ele vier vazio, caímos no referrer.
-        subId1: node.utmContent || node.referrer || null,
+        subId1:   node.utmContent || node.referrer || null,
         referrer: node.referrer || '',
         device:   node.device   || '',
         buyerType: node.buyerType || '',
-        // Não temos detalhe por item via API ainda — mantemos o item sintético
-        // pra não quebrar o pipeline atual do shopeeRepository.js.
         itemReportList: [{
           itemName:       'Venda Shopee',
-          itemPrice:      totalComm * 10,
+          itemPrice:      0,                                  // ← antes era totalComm * 10 (chute). Zerado pra não inflar GMV.
           qty:            1,
           commission:     totalComm || sellerComm,
           atributionType: '',
@@ -186,9 +169,9 @@ app.post('/api/shopee/conversions', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Endpoint de DEBUG: introspecta o schema.
-// Agora também revela ConversionReportOrder (pra eu/você descobrir
-// os campos de item-level depois).
+// Endpoint de DEBUG: schema completo (última rodada)
+// Agora introspecta também ConversionReportOrderItem (preço/nome do item)
+// e os ENUMS (pra saber os valores reais de status e atribuição).
 // ---------------------------------------------------------------------------
 async function runSchema(appId, secret, res) {
   try {
@@ -197,34 +180,32 @@ async function runSchema(appId, secret, res) {
     }
 
     const query = `{
-      Query: __type(name: "Query") {
-        fields {
-          name
-          args { name type { kind name ofType { kind name } } }
-          type { kind name ofType { kind name } }
-        }
-      }
-      ConversionReport: __type(name: "ConversionReport") {
-        fields { name type { kind name ofType { kind name ofType { kind name } } } }
-      }
       ConversionReportOrder: __type(name: "ConversionReportOrder") {
         fields { name type { kind name ofType { kind name ofType { kind name } } } }
       }
-      PageInfo: __type(name: "PageInfo") {
-        fields { name type { kind name } }
+      ConversionReportOrderItem: __type(name: "ConversionReportOrderItem") {
+        fields { name type { kind name ofType { kind name ofType { kind name } } } }
+      }
+      ConversionStatus: __type(name: "ConversionStatus") {
+        enumValues { name }
+      }
+      DisplayOrderStatus: __type(name: "DisplayOrderStatus") {
+        enumValues { name }
+      }
+      AttributionType: __type(name: "AttributionType") {
+        enumValues { name }
       }
     }`;
 
     const data = await shopeeFetch(query, appId, secret);
-    const convField = (data?.Query?.fields || []).find(f => f.name === 'conversionReport');
 
     res.json({
       success: true,
-      conversionReport_args: convField?.args || null,
-      conversionReport_returnType: convField?.type || null,
-      ConversionReport_node_fields: data?.ConversionReport?.fields || null,
-      ConversionReportOrder_fields: data?.ConversionReportOrder?.fields || null,
-      PageInfo_fields: data?.PageInfo?.fields || null,
+      ConversionReportOrder_fields:     data?.ConversionReportOrder?.fields     || null,
+      ConversionReportOrderItem_fields: data?.ConversionReportOrderItem?.fields || null,
+      ConversionStatus_values:          data?.ConversionStatus?.enumValues       || null,
+      DisplayOrderStatus_values:        data?.DisplayOrderStatus?.enumValues     || null,
+      AttributionType_values:           data?.AttributionType?.enumValues        || null,
     });
   } catch (error) {
     console.error('[Proxy] Erro no schema:', error.message);
@@ -241,12 +222,10 @@ app.get('/api/shopee/schema', (req, res) => {
   runSchema(appId, secret, res);
 });
 
-// Endpoint: Cliques
 app.post('/api/shopee/clicks', async (req, res) => {
   res.json({ success: true, data: [], message: "Cliques vazios passados por compatibilidade." });
 });
 
-// Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
