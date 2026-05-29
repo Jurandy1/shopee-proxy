@@ -15,8 +15,10 @@ app.use(express.json());
 
 const SHOPEE_API_URL = 'https://open-api.affiliate.shopee.com.br/graphql';
 
-// A API aceita até 500 por requisição. Subimos de 100 -> 500.
+// Limite por página (a API costuma aceitar até 500).
 const PAGE_LIMIT = 500;
+// Trava de segurança contra loop infinito (500 * 200 = 100k pedidos).
+const MAX_PAGES = 200;
 
 function generateSignature(appId, timestamp, payload, secret) {
   const baseStr = appId + timestamp + payload + secret;
@@ -53,10 +55,43 @@ async function shopeeFetch(query, appId, secret) {
   return data.data;
 }
 
+// Monta a query de UMA página. Continuamos injetando os valores
+// direto na string (sem usar $variables) pra fugir do erro "wrong type".
+// scrollId é String, então JSON.stringify cuida das aspas/escapes.
+function buildConversionQuery(startTs, endTs, scrollId) {
+  const scrollClause = scrollId ? `, scrollId: ${JSON.stringify(scrollId)}` : '';
+  return `{
+    conversionReport(
+      limit: ${PAGE_LIMIT},
+      purchaseTimeStart: ${startTs},
+      purchaseTimeEnd: ${endTs}${scrollClause}
+    ) {
+      nodes {
+        purchaseTime
+        clickTime
+        conversionId
+        checkoutId
+        conversionStatus
+        totalCommission
+        sellerCommission
+        netCommission
+        estimatedTotalCommission
+        grossCommission
+        referrer
+        utmContent
+        device
+        buyerType
+      }
+      pageInfo {
+        hasNextPage
+        scrollId
+      }
+    }
+  }`;
+}
+
 // ---------------------------------------------------------------------------
-// Endpoint: Conversões — VERSÃO SEGURA (só campos que a API já aceitou)
-// Sem "page", sem "subId1", sem "itemReportList" (a API recusou esses).
-// Só subimos o limit pra 500. Volta a funcionar imediatamente.
+// Endpoint: Conversões — com PAGINAÇÃO via scrollId
 // ---------------------------------------------------------------------------
 app.post('/api/shopee/conversions', async (req, res) => {
   try {
@@ -70,46 +105,79 @@ app.post('/api/shopee/conversions', async (req, res) => {
 
     console.log(`[Proxy] Buscando conversões: ${startDate} (${startTs}) → ${endDate} (${endTs})`);
 
-    const query = `{
-      conversionReport(
-        limit: ${PAGE_LIMIT},
-        purchaseTimeStart: ${startTs},
-        purchaseTimeEnd: ${endTs}
-      ) {
-        nodes {
-          purchaseTime
-          clickTime
-          conversionId
-          conversionStatus
-          totalCommission
-          sellerCommission
-        }
+    const allNodes = [];
+    let scrollId = null;
+    let hasNext = true;
+    let pageCount = 0;
+
+    while (hasNext && pageCount < MAX_PAGES) {
+      pageCount++;
+      const query = buildConversionQuery(startTs, endTs, scrollId);
+      const data = await shopeeFetch(query, appId, secret);
+
+      const report = data?.conversionReport || {};
+      const nodes = report.nodes || [];
+      allNodes.push(...nodes);
+
+      const pi = report.pageInfo || {};
+      hasNext = pi.hasNextPage === true;
+      const nextScroll = pi.scrollId || null;
+
+      console.log(`[Proxy] Página ${pageCount}: +${nodes.length} (acumulado: ${allNodes.length}) | próxima? ${hasNext}`);
+
+      // Se a API diz que tem próxima mas não devolve scrollId, paramos pra
+      // não cair em loop infinito puxando sempre a mesma página.
+      if (hasNext && !nextScroll) {
+        console.warn('[Proxy] hasNextPage=true mas sem scrollId. Parando por segurança.');
+        break;
       }
-    }`;
+      scrollId = nextScroll;
+    }
 
-    const data = await shopeeFetch(query, appId, secret);
-    const nodes = data?.conversionReport?.nodes || [];
+    if (pageCount >= MAX_PAGES && hasNext) {
+      console.warn('[Proxy] Atingiu MAX_PAGES — pode haver dados não buscados.');
+    }
 
-    const transformed = nodes.map(node => ({
-      purchaseTime:     node.purchaseTime,
-      clickTime:        node.clickTime,
-      conversionId:     node.conversionId,
-      orderId:          node.conversionId,
-      orderStatus:      node.conversionStatus || '',
-      totalCommission:  parseFloat(node.totalCommission  || 0),
-      sellerCommission: parseFloat(node.sellerCommission || 0),
-      subId1:           null,
-      itemReportList: [{
-        itemName:       'Venda Shopee',
-        itemPrice:      parseFloat(node.totalCommission || 0) * 10,
-        qty:            1,
-        commission:     parseFloat(node.totalCommission || node.sellerCommission || 0),
-        atributionType: '',
-      }],
-    }));
+    // Transforma pro formato que o shopeeRepository.js já espera.
+    // Comissões vêm como String — parseFloat em tudo.
+    const transformed = allNodes.map(node => {
+      const totalComm  = parseFloat(node.totalCommission   || '0') || 0;
+      const sellerComm = parseFloat(node.sellerCommission  || '0') || 0;
+      const netComm    = parseFloat(node.netCommission     || '0') || 0;
+      const estComm    = parseFloat(node.estimatedTotalCommission || '0') || 0;
 
-    console.log(`[Proxy] Total de conversões extraídas: ${transformed.length}`);
-    res.json({ success: true, data: transformed });
+      return {
+        purchaseTime:     node.purchaseTime,
+        clickTime:        node.clickTime,
+        conversionId:     String(node.conversionId || ''),
+        orderId:          String(node.conversionId || ''),
+        checkoutId:       String(node.checkoutId || ''),
+        orderStatus:      node.conversionStatus || '',
+        totalCommission:  totalComm,
+        sellerCommission: sellerComm,
+        netCommission:    netComm,
+        estimatedCommission: estComm,
+        // A API não tem "subId1" nesse nó. O melhor proxy disponível é o
+        // utmContent (onde o link de afiliado costuma carregar o sub_id).
+        // Se ele vier vazio, caímos no referrer.
+        subId1: node.utmContent || node.referrer || null,
+        referrer: node.referrer || '',
+        device:   node.device   || '',
+        buyerType: node.buyerType || '',
+        // Não temos detalhe por item via API ainda — mantemos o item sintético
+        // pra não quebrar o pipeline atual do shopeeRepository.js.
+        itemReportList: [{
+          itemName:       'Venda Shopee',
+          itemPrice:      totalComm * 10,
+          qty:            1,
+          commission:     totalComm || sellerComm,
+          atributionType: '',
+        }],
+      };
+    });
+
+    console.log(`[Proxy] Total de conversões extraídas: ${transformed.length} em ${pageCount} página(s)`);
+    res.json({ success: true, data: transformed, meta: { pages: pageCount, total: transformed.length } });
 
   } catch (error) {
     console.error('[Proxy] Erro nas conversões:', error.message);
@@ -118,12 +186,9 @@ app.post('/api/shopee/conversions', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Endpoint TEMPORÁRIO de DEBUG: descobre o schema real da API.
-// Chame com POST (ou GET) passando appId e secret e me mande o JSON de volta.
-// Ele revela:
-//  - os ARGUMENTOS aceitos pelo conversionReport (achar como paginar: scrollId?)
-//  - os CAMPOS do nó ConversionReport (achar o nome real de sub_id / itens)
-//  - os campos de PageInfo (hasNextPage, scrollId, endCursor?)
+// Endpoint de DEBUG: introspecta o schema.
+// Agora também revela ConversionReportOrder (pra eu/você descobrir
+// os campos de item-level depois).
 // ---------------------------------------------------------------------------
 async function runSchema(appId, secret, res) {
   try {
@@ -142,22 +207,24 @@ async function runSchema(appId, secret, res) {
       ConversionReport: __type(name: "ConversionReport") {
         fields { name type { kind name ofType { kind name ofType { kind name } } } }
       }
+      ConversionReportOrder: __type(name: "ConversionReportOrder") {
+        fields { name type { kind name ofType { kind name ofType { kind name } } } }
+      }
       PageInfo: __type(name: "PageInfo") {
         fields { name type { kind name } }
       }
     }`;
 
     const data = await shopeeFetch(query, appId, secret);
-
-    // Filtra só o conversionReport pra facilitar a leitura
     const convField = (data?.Query?.fields || []).find(f => f.name === 'conversionReport');
 
     res.json({
       success: true,
-      conversionReport_args: convField?.args || 'campo conversionReport não encontrado',
+      conversionReport_args: convField?.args || null,
       conversionReport_returnType: convField?.type || null,
-      ConversionReport_node_fields: data?.ConversionReport?.fields || 'tipo ConversionReport não encontrado',
-      PageInfo_fields: data?.PageInfo?.fields || 'tipo PageInfo não encontrado',
+      ConversionReport_node_fields: data?.ConversionReport?.fields || null,
+      ConversionReportOrder_fields: data?.ConversionReportOrder?.fields || null,
+      PageInfo_fields: data?.PageInfo?.fields || null,
     });
   } catch (error) {
     console.error('[Proxy] Erro no schema:', error.message);
@@ -169,9 +236,6 @@ app.post('/api/shopee/schema', (req, res) => {
   const { appId, secret } = req.body || {};
   runSchema(appId, secret, res);
 });
-
-// Versão GET pra você poder abrir direto no navegador:
-//   https://SEU-PROXY/api/shopee/schema?appId=XXX&secret=YYY
 app.get('/api/shopee/schema', (req, res) => {
   const { appId, secret } = req.query || {};
   runSchema(appId, secret, res);
