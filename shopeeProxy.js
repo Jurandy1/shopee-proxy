@@ -15,9 +15,10 @@ function generateSignature(appId, timestamp, payload, secret) {
   return crypto.createHash('sha256').update(baseStr).digest('hex');
 }
 
-async function shopeeFetch(query, variables, appId, secret) {
+async function shopeeFetch(query, appId, secret) {
   const timestamp = Math.floor(Date.now() / 1000);
-  const payload = JSON.stringify({ query, variables });
+  // Sem variáveis — timestamps inline na query
+  const payload = JSON.stringify({ query });
   const signature = generateSignature(appId, timestamp, payload, secret);
 
   console.log('[Proxy] Chamando API Shopee...');
@@ -50,83 +51,6 @@ async function shopeeFetch(query, variables, appId, secret) {
   return data.data;
 }
 
-async function fetchAllConversions({ startTs, endTs, appId, secret, pageSize = 100, maxPages = 200 }) {
-  let page = 1;
-  let hasNextPage = true;
-  const all = [];
-
-  while (hasNextPage && page <= maxPages) {
-    const query = `
-      query ($page: Int, $pageSize: Int) {
-        conversionReport(
-          page: $page,
-          pageSize: $pageSize,
-          purchaseTimeStart: ${startTs},
-          purchaseTimeEnd: ${endTs}
-        ) {
-          nodes {
-            purchaseTime
-            clickTime
-            conversionId
-            conversionStatus
-            totalCommission
-            sellerCommission
-          }
-          pageInfo {
-            page
-            hasNextPage
-          }
-        }
-      }
-    `;
-
-    let data;
-    try {
-      data = await shopeeFetch(query, { page, pageSize }, appId, secret);
-    } catch (e) {
-      if (String(e?.message || e).includes('Unknown argument "pageSize"')) {
-        const queryAlt = `
-          query ($page: Int, $limit: Int) {
-            conversionReport(
-              page: $page,
-              limit: $limit,
-              purchaseTimeStart: ${startTs},
-              purchaseTimeEnd: ${endTs}
-            ) {
-              nodes {
-                purchaseTime
-                clickTime
-                conversionId
-                conversionStatus
-                totalCommission
-                sellerCommission
-              }
-              pageInfo {
-                page
-                hasNextPage
-              }
-            }
-          }
-        `;
-        data = await shopeeFetch(queryAlt, { page, limit: pageSize }, appId, secret);
-      } else {
-        throw e;
-      }
-    }
-
-    const block = data?.conversionReport;
-    const nodes = block?.nodes || [];
-    all.push(...nodes);
-
-    hasNextPage = Boolean(block?.pageInfo?.hasNextPage);
-    if (!hasNextPage) break;
-    if (nodes.length === 0) break;
-    page += 1;
-  }
-
-  return all;
-}
-
 // Endpoint: Conversões
 app.post('/api/shopee/conversions', async (req, res) => {
   try {
@@ -139,14 +63,29 @@ app.post('/api/shopee/conversions', async (req, res) => {
     console.log(`[Proxy] Conversões: ${startDate} → ${endDate}`);
     console.log(`[Proxy] Timestamps: ${startTs} → ${endTs}`);
 
-    const nodes = await fetchAllConversions({
-      startTs,
-      endTs,
-      appId,
-      secret,
-      pageSize: Number(req.body.pageSize || 100),
-      maxPages: Number(req.body.maxPages || 200),
-    });
+    // Timestamps inline na query (sem variáveis) para evitar problema de tipo Int64
+    const query = `{
+      conversionReport(
+        purchaseTimeStart: ${startTs},
+        purchaseTimeEnd: ${endTs}
+      ) {
+        nodes {
+          purchaseTime
+          clickTime
+          conversionId
+          conversionStatus
+          totalCommission
+          sellerCommission
+        }
+        pageInfo {
+          page
+          hasNextPage
+        }
+      }
+    }`;
+
+    const data = await shopeeFetch(query, appId, secret);
+    const nodes = data?.conversionReport?.nodes || [];
 
     const transformed = nodes.map(node => ({
       purchaseTime:     node.purchaseTime,
