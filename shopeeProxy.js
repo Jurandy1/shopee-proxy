@@ -5,7 +5,13 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-app.use(cors());
+// Configuração explícita de CORS para aceitar qualquer origem com segurança
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
 
 const SHOPEE_API_URL = 'https://open-api.affiliate.shopee.com.br/graphql';
@@ -35,7 +41,7 @@ async function shopeeFetch(query, appId, secret) {
   try {
     data = JSON.parse(text);
   } catch (e) {
-    throw new Error('Resposta inválida: ' + text.slice(0, 200));
+    throw new Error('Resposta inválida da Shopee: ' + text.slice(0, 200));
   }
 
   if (data.errors && data.errors.length > 0) {
@@ -54,16 +60,15 @@ app.post('/api/shopee/conversions', async (req, res) => {
     const startTs = Math.floor(new Date(startDate).getTime() / 1000);
     const endTs   = Math.floor(new Date(endDate).getTime() / 1000);
 
-    console.log(`[Proxy] Buscando volume máximo de dados: ${startDate} → ${endDate}`);
+    console.log(`[Proxy] Coletando Conversões: ${startDate} → ${endDate}`);
 
     let allNodes = [];
     let currentPage = 1;
     let hasNextPage = true;
 
     while (hasNextPage) {
-      console.log(`[Proxy] Coletando página ${currentPage}...`);
+      console.log(`[Proxy] Buscando página de conversões: ${currentPage}...`);
       
-      // Query com todos os campos existentes no relatório de conversão de afiliados Shopee
       const query = `{
         conversionReport(
           page: ${currentPage},
@@ -104,46 +109,50 @@ app.post('/api/shopee/conversions', async (req, res) => {
       }
     }
 
-    // Mapeamento completo injetando os dados reais obtidos da API
     const transformed = allNodes.map(node => ({
-      purchaseTime:     node.purchaseTime,                        // Timestamp da compra
-      clickTime:        node.clickTime,                           // Timestamp do clique no link
-      completeTime:     node.completeTime || null,                // Timestamp de conclusão da ordem
-      conversionId:     node.conversionId,                        // ID único da conversão
-      orderId:          node.conversionId,                        // Espelhado para compatibilidade do front
-      orderStatus:      node.conversionStatus || '',              // Status (Pendente, Pago, Cancelado, etc.)
-      currency:         node.currency || 'BRL',                   // Moeda da transação
-      matchingType:     node.matchingType || '',                  // Tipo de atribuição (ex: Direta/Indireta)
-      salesVolume:      parseFloat(node.salesVolume || 0),        // Valor total que o cliente gastou na compra
-      totalCommission:  parseFloat(node.totalCommission  || 0),  // Comissão total gerada
-      sellerCommission: parseFloat(node.sellerCommission || 0),  // Comissão paga pelo vendedor
-      shopeeCommission: parseFloat(node.shopeeCommission || 0),  // Comissão paga pela Shopee
-      subId1:           node.extInfo || null,                     // Parâmetro personalizado de rastreamento (subId)
-      
-      // Reconstruindo a lista de itens com os dados financeiros máximos possíveis
+      purchaseTime:     node.purchaseTime,
+      clickTime:        node.clickTime,
+      completeTime:     node.completeTime || null,
+      conversionId:     node.conversionId,
+      orderId:          node.conversionId,
+      orderStatus:      node.conversionStatus || '',
+      currency:         node.currency || 'BRL',
+      matchingType:     node.matchingType || '',
+      salesVolume:      parseFloat(node.salesVolume || 0),
+      totalCommission:  parseFloat(node.totalCommission  || 0),
+      sellerCommission: parseFloat(node.sellerCommission || 0),
+      shopeeCommission: parseFloat(node.shopeeCommission || 0),
+      subId1:           node.extInfo || null,
       itemReportList: [{
         itemName:       'Venda Shopee',
-        itemPrice:      parseFloat(node.salesVolume || 0),        // Preço real mapeado do volume de vendas
+        itemPrice:      parseFloat(node.salesVolume || 0),
         qty:            1,
-        commission:     parseFloat(node.totalCommission || 0),    // Comissão integral do nó
+        commission:     parseFloat(node.totalCommission || 0),
         atributionType: node.matchingType || '',
       }],
     }));
 
-    console.log(`[Proxy] Sucesso! ${transformed.length} registros ricos exportados.`);
+    console.log(`[Proxy] Sucesso! Enviando ${transformed.length} registros para o front.`);
     res.json({ success: true, data: transformed });
 
   } catch (error) {
-    console.error('[Proxy] Erro na mineração de conversões:', error.message);
+    console.error('[Proxy] Erro nas conversões:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Endpoint: Cliques
+// Endpoint: Cliques (Respondendo vazio estruturado para o front-end não falhar)
 app.post('/api/shopee/clicks', async (req, res) => {
-  res.json({ success: true, data: [], message: "Use o endpoint de conversões para pegar dados de cliques cruzados via clickTime" });
+  console.log('[Proxy] Rota de cliques chamada — respondendo array vazio.');
+  res.json({ success: true, data: [] });
 });
 
-// Health check
+// Health check corrigido
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Inicialização do servidor corrigida
+app.listen(PORT, () => {
+  console.log(`🚀 Shopee Proxy ativo e rodando na porta ${PORT}`);
+});
