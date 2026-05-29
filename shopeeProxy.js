@@ -33,8 +33,7 @@ async function shopeeFetch(query, variables, appId, secret) {
 
   const text = await response.text();
   console.log('[Proxy] Status:', response.status);
-  console.log('[Proxy] Resposta:', text.slice(0, 1000));
-
+  
   let data;
   try {
     data = JSON.parse(text);
@@ -52,18 +51,20 @@ async function shopeeFetch(query, variables, appId, secret) {
 // Endpoint: Conversões
 app.post('/api/shopee/conversions', async (req, res) => {
   try {
-    const { startDate, endDate, appId, secret } = req.body;
+    // Adicionado "page" vindo do req.body (padrão 1 se o front não enviar)
+    const { startDate, endDate, appId, secret, page = 1 } = req.body;
     if (!appId || !secret) return res.status(400).json({ success: false, error: 'appId e secret são obrigatórios' });
 
-    const startTs = parseInt(Math.floor(new Date(startDate).getTime() / 1000));
-    const endTs   = parseInt(Math.floor(new Date(endDate).getTime() / 1000));
+    const startTs = Math.floor(new Date(startDate).getTime() / 1000);
+    const endTs   = Math.floor(new Date(endDate).getTime() / 1000);
 
-    console.log(`[Proxy] Conversões: ${startDate} → ${endDate}`);
-    console.log(`[Proxy] Timestamps: ${startTs} → ${endTs}`);
+    console.log(`[Proxy] Conversões: ${startDate} → ${endDate} (Página: ${page})`);
 
+    // Ajustado tipos para Int e adicionado o parâmetro page exigido pela Shopee
     const query = `
-      query ($purchaseTimeStart: Int64, $purchaseTimeEnd: Int64) {
+      query ($page: Int!, $purchaseTimeStart: Int, $purchaseTimeEnd: Int) {
         conversionReport(
+          page: $page,
           purchaseTimeStart: $purchaseTimeStart,
           purchaseTimeEnd: $purchaseTimeEnd
         ) {
@@ -84,6 +85,7 @@ app.post('/api/shopee/conversions', async (req, res) => {
     `;
 
     const data = await shopeeFetch(query, {
+      page: parseInt(page),
       purchaseTimeStart: startTs,
       purchaseTimeEnd: endTs,
     }, appId, secret);
@@ -108,9 +110,7 @@ app.post('/api/shopee/conversions', async (req, res) => {
       }],
     }));
 
-    console.log(`[Proxy] Total conversões: ${transformed.length}`);
-    if (transformed.length > 0) console.log('[Proxy] Exemplo:', JSON.stringify(transformed[0], null, 2));
-
+    console.log(`[Proxy] Total conversões retornadas: ${transformed.length}`);
     res.json({ success: true, data: transformed });
   } catch (error) {
     console.error('[Proxy] Erro conversões:', error.message);
@@ -121,17 +121,19 @@ app.post('/api/shopee/conversions', async (req, res) => {
 // Endpoint: Cliques
 app.post('/api/shopee/clicks', async (req, res) => {
   try {
-    const { startDate, endDate, appId, secret } = req.body;
+    const { startDate, endDate, appId, secret, page = 1 } = req.body;
     if (!appId || !secret) return res.status(400).json({ success: false, error: 'appId e secret são obrigatórios' });
 
-    const startTs = parseInt(Math.floor(new Date(startDate).getTime() / 1000));
-    const endTs   = parseInt(Math.floor(new Date(endDate).getTime() / 1000));
+    const startTs = Math.floor(new Date(startDate).getTime() / 1000);
+    const endTs   = Math.floor(new Date(endDate).getTime() / 1000);
 
-    console.log(`[Proxy] Cliques: ${startDate} → ${endDate}`);
+    console.log(`[Proxy] Cliques: ${startDate} → ${endDate} (Página: ${page})`);
 
+    // Ajustado tipos para Int e adicionado o parâmetro page exigido pela Shopee
     const query = `
-      query ($clickTimeStart: Int64, $clickTimeEnd: Int64) {
+      query ($page: Int!, $clickTimeStart: Int, $clickTimeEnd: Int) {
         clickReport(
+          page: $page,
           clickTimeStart: $clickTimeStart,
           clickTimeEnd: $clickTimeEnd
         ) {
@@ -148,6 +150,7 @@ app.post('/api/shopee/clicks', async (req, res) => {
     `;
 
     const data = await shopeeFetch(query, {
+      page: parseInt(page),
       clickTimeStart: startTs,
       clickTimeEnd: endTs,
     }, appId, secret);
@@ -159,7 +162,7 @@ app.post('/api/shopee/clicks', async (req, res) => {
       subId1:    node.subId1 || null,
     }));
 
-    console.log(`[Proxy] Total cliques: ${transformed.length}`);
+    console.log(`[Proxy] Total cliques retornados: ${transformed.length}`);
     res.json({ success: true, data: transformed });
   } catch (error) {
     console.error('[Proxy] Erro cliques:', error.message);
