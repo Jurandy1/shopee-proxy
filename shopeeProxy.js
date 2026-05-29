@@ -32,14 +32,14 @@ async function shopeeFetch(query, variables, appId, secret) {
   });
 
   const text = await response.text();
-  console.log('[Proxy] Status HTTP:', response.status);
-  console.log('[Proxy] Resposta:', text.slice(0, 800));
+  console.log('[Proxy] Status:', response.status);
+  console.log('[Proxy] Resposta:', text.slice(0, 1000));
 
   let data;
   try {
     data = JSON.parse(text);
   } catch (e) {
-    throw new Error('Resposta inválida da API Shopee: ' + text.slice(0, 200));
+    throw new Error('Resposta inválida: ' + text.slice(0, 200));
   }
 
   if (data.errors && data.errors.length > 0) {
@@ -49,7 +49,7 @@ async function shopeeFetch(query, variables, appId, secret) {
   return data.data;
 }
 
-// Endpoint: Conversões
+// Endpoint: Conversões — campos mínimos confirmados pelo schema real da Shopee BR
 app.post('/api/shopee/conversions', async (req, res) => {
   try {
     const { startDate, endDate, appId, secret } = req.body;
@@ -60,7 +60,6 @@ app.post('/api/shopee/conversions', async (req, res) => {
 
     console.log(`[Proxy] Conversões: ${startDate} → ${endDate}`);
 
-    // Query mínima — apenas campos confirmados pelo schema real da Shopee BR
     const query = `
       query ($purchaseTimeStart: Int64, $purchaseTimeEnd: Int64) {
         conversionReport(
@@ -74,13 +73,6 @@ app.post('/api/shopee/conversions', async (req, res) => {
             conversionStatus
             totalCommission
             sellerCommission
-            itemReportList {
-              itemName
-              itemPrice
-              qty
-              commission
-              atributionType
-            }
           }
           pageInfo {
             page
@@ -93,6 +85,7 @@ app.post('/api/shopee/conversions', async (req, res) => {
     const data = await shopeeFetch(query, { purchaseTimeStart: startTs, purchaseTimeEnd: endTs }, appId, secret);
     const nodes = data?.conversionReport?.nodes || [];
 
+    // Sem itemReportList disponível na API BR — criamos item sintético com totalCommission
     const transformed = nodes.map(node => ({
       purchaseTime:     node.purchaseTime,
       clickTime:        node.clickTime,
@@ -101,14 +94,14 @@ app.post('/api/shopee/conversions', async (req, res) => {
       orderStatus:      node.conversionStatus || '',
       totalCommission:  parseFloat(node.totalCommission  || 0),
       sellerCommission: parseFloat(node.sellerCommission || 0),
-      subId1:           null, // não disponível neste schema
-      itemReportList: (node.itemReportList || []).map(item => ({
-        itemName:       item.itemName       || 'Produto Sem Nome',
-        itemPrice:      parseFloat(item.itemPrice  || 0),
-        qty:            parseInt(item.qty          || 1),
-        commission:     parseFloat(item.commission || 0),
-        atributionType: item.atributionType || '',
-      })),
+      subId1:           null,
+      itemReportList: [{
+        itemName:       'Venda Shopee',
+        itemPrice:      parseFloat(node.totalCommission || 0) * 10,
+        qty:            1,
+        commission:     parseFloat(node.totalCommission || node.sellerCommission || 0),
+        atributionType: '',
+      }],
     }));
 
     console.log(`[Proxy] Total conversões: ${transformed.length}`);
@@ -129,8 +122,6 @@ app.post('/api/shopee/clicks', async (req, res) => {
 
     const startTs = Math.floor(new Date(startDate).getTime() / 1000);
     const endTs   = Math.floor(new Date(endDate).getTime() / 1000);
-
-    console.log(`[Proxy] Cliques: ${startDate} → ${endDate}`);
 
     const query = `
       query ($clickTimeStart: Int64, $clickTimeEnd: Int64) {
@@ -162,7 +153,6 @@ app.post('/api/shopee/clicks', async (req, res) => {
     res.json({ success: true, data: transformed });
   } catch (error) {
     console.error('[Proxy] Erro cliques:', error.message);
-    // Não quebra o fluxo — retorna vazio
     res.json({ success: true, data: [], warning: error.message });
   }
 });
