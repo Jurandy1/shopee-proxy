@@ -38,21 +38,17 @@ async function shopeeFetch(query, appId, secret) {
   });
 
   const text = await response.text();
-
   let data;
-  try {
-    data = JSON.parse(text);
-  } catch (e) {
-    throw new Error('Resposta inválida: ' + text.slice(0, 200));
-  }
+  try { data = JSON.parse(text); }
+  catch (e) { throw new Error('Resposta inválida: ' + text.slice(0, 200)); }
 
   if (data.errors && data.errors.length > 0) {
     throw new Error(data.errors.map(e => e.message).join('; '));
   }
-
   return data.data;
 }
 
+// Query completa: desce até items pra pegar nome/preço/qtd/comissão reais.
 function buildConversionQuery(startTs, endTs, scrollId) {
   const scrollClause = scrollId ? `, scrollId: ${JSON.stringify(scrollId)}` : '';
   return `{
@@ -70,12 +66,36 @@ function buildConversionQuery(startTs, endTs, scrollId) {
         totalCommission
         sellerCommission
         netCommission
-        estimatedTotalCommission
-        grossCommission
         referrer
         utmContent
         device
         buyerType
+        orders {
+          orderId
+          orderStatus
+          shopType
+          items {
+            itemId
+            itemName
+            itemPrice
+            actualAmount
+            refundAmount
+            qty
+            itemCommission
+            itemTotalCommission
+            itemSellerCommission
+            itemShopeeCommissionRate
+            shopId
+            shopName
+            categoryLv1Name
+            categoryLv2Name
+            categoryLv3Name
+            attributionType
+            channelType
+            displayItemStatus
+            imageUrl
+          }
+        }
       }
       pageInfo {
         hasNextPage
@@ -85,9 +105,16 @@ function buildConversionQuery(startTs, endTs, scrollId) {
   }`;
 }
 
+// Traduz o enum AttributionType pro vocabulário PT-BR que o shopeeRepository
+// detecta (includes("mesma") => direta).
+function translateAttribution(attr) {
+  if (attr === 'ORDERED_IN_SAME_SHOP') return 'Pedido em loja mesma';
+  if (attr === 'ORDERED_IN_DIFFERENT_SHOP') return 'Pedido em loja diferente';
+  return attr || '';
+}
+
 // ---------------------------------------------------------------------------
-// Endpoint: Conversões — paginação por scrollId, item fake com itemPrice=0
-// (pra não inflar o GMV no dashboard enquanto não puxamos o item real)
+// Endpoint: Conversões — com itens reais, GMV real, atribuição traduzida.
 // ---------------------------------------------------------------------------
 app.post('/api/shopee/conversions', async (req, res) => {
   try {
@@ -128,39 +155,102 @@ app.post('/api/shopee/conversions', async (req, res) => {
       scrollId = nextScroll;
     }
 
-    const transformed = allNodes.map(node => {
-      const totalComm  = parseFloat(node.totalCommission  || '0') || 0;
-      const sellerComm = parseFloat(node.sellerCommission || '0') || 0;
-      const netComm    = parseFloat(node.netCommission    || '0') || 0;
-      const estComm    = parseFloat(node.estimatedTotalCommission || '0') || 0;
+    // FLATTEN: emite uma entrada "order-like" por ORDER (não por conversion).
+    // Uma conversion pode ter várias orders (lojas diferentes); cada order
+    // tem N items. O shopeeRepository.js itera "conversions" e dentro de cada
+    // um espera um itemReportList — então cada order vira uma "conversion"
+    // do ponto de vista do repo.
+    const transformed = [];
+    let totalItems = 0;
 
-      return {
-        purchaseTime:     node.purchaseTime,
-        clickTime:        node.clickTime,
-        conversionId:     String(node.conversionId || ''),
-        orderId:          String(node.conversionId || ''),
-        checkoutId:       String(node.checkoutId || ''),
-        orderStatus:      node.conversionStatus || '',
-        totalCommission:  totalComm,
-        sellerCommission: sellerComm,
-        netCommission:    netComm,
-        estimatedCommission: estComm,
-        subId1:   node.utmContent || node.referrer || null,
-        referrer: node.referrer || '',
-        device:   node.device   || '',
-        buyerType: node.buyerType || '',
-        itemReportList: [{
-          itemName:       'Venda Shopee',
-          itemPrice:      0,                                  // ← antes era totalComm * 10 (chute). Zerado pra não inflar GMV.
-          qty:            1,
-          commission:     totalComm || sellerComm,
-          atributionType: '',
-        }],
-      };
+    for (const node of allNodes) {
+      const orders = node.orders || [];
+      const baseSubId = node.utmContent || node.referrer || null;
+
+      if (orders.length === 0) {
+        // Salvaguarda: conversão sem orders. Não deve acontecer mas, se acontecer,
+        // mando uma entrada vazia pro repo não quebrar.
+        transformed.push({
+          purchaseTime:     node.purchaseTime,
+          clickTime:        node.clickTime,
+          conversionId:     String(node.conversionId || ''),
+          orderId:          String(node.conversionId || ''),
+          orderStatus:      node.conversionStatus || '',
+          totalCommission:  parseFloat(node.totalCommission || '0') || 0,
+          sellerCommission: parseFloat(node.sellerCommission || '0') || 0,
+          netCommission:    parseFloat(node.netCommission || '0') || 0,
+          subId1:           baseSubId,
+          referrer:         node.referrer || '',
+          device:           node.device || '',
+          buyerType:        node.buyerType || '',
+          itemReportList:   [],
+        });
+        continue;
+      }
+
+      for (const ord of orders) {
+        const items = ord.items || [];
+
+        const itemReportList = items.map(it => {
+          const price   = parseFloat(it.itemPrice    || '0') || 0;
+          const actual  = parseFloat(it.actualAmount || '0') || 0;
+          const refund  = parseFloat(it.refundAmount || '0') || 0;
+          const qty     = parseInt(it.qty, 10) || 1;
+          const comm    = parseFloat(it.itemCommission || it.itemTotalCommission || '0') || 0;
+
+          // GMV real: valor pago menos reembolso. Se actualAmount não vier,
+          // cai pro preço * qtd.
+          const faturamento = (actual > 0 ? actual : price * qty) - refund;
+
+          return {
+            itemName:       it.itemName || 'Produto Sem Nome',
+            itemPrice:      faturamento,                          // ← lido como gmv_total pelo repo
+            unitPrice:      price,                                // (informativo)
+            qty:            qty,
+            commission:     comm,
+            commissionRate: it.itemShopeeCommissionRate || '',
+            atributionType: translateAttribution(it.attributionType),
+            itemId:         String(it.itemId || ''),
+            shopId:         String(it.shopId || ''),
+            shopName:       it.shopName || '',
+            categoria:      [it.categoryLv1Name, it.categoryLv2Name, it.categoryLv3Name].filter(Boolean).join(' > '),
+            imageUrl:       it.imageUrl || '',
+            channelType:    it.channelType || '',
+            displayItemStatus: it.displayItemStatus || '',
+            refundAmount:   refund,
+          };
+        });
+
+        totalItems += itemReportList.length;
+
+        transformed.push({
+          purchaseTime:     node.purchaseTime,
+          clickTime:        node.clickTime,
+          conversionId:     String(node.conversionId || ''),
+          // orderStatus DA ORDEM (DisplayOrderStatus) — repo lowercaseia e checa
+          // includes("cancel") / includes("completed") etc. Os enums COMPLETED,
+          // PENDING, CANCELLED, UNPAID já batem direto.
+          orderId:          String(ord.orderId || node.conversionId || ''),
+          orderStatus:      ord.orderStatus || node.conversionStatus || '',
+          shopType:         ord.shopType || '',
+          totalCommission:  parseFloat(node.totalCommission  || '0') || 0,
+          sellerCommission: parseFloat(node.sellerCommission || '0') || 0,
+          netCommission:    parseFloat(node.netCommission    || '0') || 0,
+          subId1:           baseSubId,
+          referrer:         node.referrer || '',
+          device:           node.device || '',
+          buyerType:        node.buyerType || '',
+          itemReportList:   itemReportList,
+        });
+      }
+    }
+
+    console.log(`[Proxy] ${allNodes.length} conversões → ${transformed.length} orders → ${totalItems} items em ${pageCount} página(s)`);
+    res.json({
+      success: true,
+      data: transformed,
+      meta: { pages: pageCount, conversions: allNodes.length, orders: transformed.length, items: totalItems }
     });
-
-    console.log(`[Proxy] Total de conversões extraídas: ${transformed.length} em ${pageCount} página(s)`);
-    res.json({ success: true, data: transformed, meta: { pages: pageCount, total: transformed.length } });
 
   } catch (error) {
     console.error('[Proxy] Erro nas conversões:', error.message);
@@ -169,58 +259,30 @@ app.post('/api/shopee/conversions', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Endpoint de DEBUG: schema completo (última rodada)
-// Agora introspecta também ConversionReportOrderItem (preço/nome do item)
-// e os ENUMS (pra saber os valores reais de status e atribuição).
+// Endpoint de DEBUG (mantido pra eventual nova introspecção).
+// Considere remover em produção.
 // ---------------------------------------------------------------------------
 async function runSchema(appId, secret, res) {
   try {
     if (!appId || !secret) {
       return res.status(400).json({ success: false, error: 'appId e secret são obrigatórios' });
     }
-
     const query = `{
-      ConversionReportOrder: __type(name: "ConversionReportOrder") {
-        fields { name type { kind name ofType { kind name ofType { kind name } } } }
-      }
       ConversionReportOrderItem: __type(name: "ConversionReportOrderItem") {
-        fields { name type { kind name ofType { kind name ofType { kind name } } } }
+        fields { name type { kind name ofType { kind name } } }
       }
-      ConversionStatus: __type(name: "ConversionStatus") {
-        enumValues { name }
-      }
-      DisplayOrderStatus: __type(name: "DisplayOrderStatus") {
-        enumValues { name }
-      }
-      AttributionType: __type(name: "AttributionType") {
-        enumValues { name }
-      }
+      ConversionStatus: __type(name: "ConversionStatus") { enumValues { name } }
+      DisplayOrderStatus: __type(name: "DisplayOrderStatus") { enumValues { name } }
+      AttributionType: __type(name: "AttributionType") { enumValues { name } }
     }`;
-
     const data = await shopeeFetch(query, appId, secret);
-
-    res.json({
-      success: true,
-      ConversionReportOrder_fields:     data?.ConversionReportOrder?.fields     || null,
-      ConversionReportOrderItem_fields: data?.ConversionReportOrderItem?.fields || null,
-      ConversionStatus_values:          data?.ConversionStatus?.enumValues       || null,
-      DisplayOrderStatus_values:        data?.DisplayOrderStatus?.enumValues     || null,
-      AttributionType_values:           data?.AttributionType?.enumValues        || null,
-    });
+    res.json({ success: true, ...data });
   } catch (error) {
-    console.error('[Proxy] Erro no schema:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 }
-
-app.post('/api/shopee/schema', (req, res) => {
-  const { appId, secret } = req.body || {};
-  runSchema(appId, secret, res);
-});
-app.get('/api/shopee/schema', (req, res) => {
-  const { appId, secret } = req.query || {};
-  runSchema(appId, secret, res);
-});
+app.post('/api/shopee/schema', (req, res) => runSchema(req.body?.appId, req.body?.secret, res));
+app.get('/api/shopee/schema', (req, res) => runSchema(req.query?.appId, req.query?.secret, res));
 
 app.post('/api/shopee/clicks', async (req, res) => {
   res.json({ success: true, data: [], message: "Cliques vazios passados por compatibilidade." });
