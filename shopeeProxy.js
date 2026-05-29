@@ -5,7 +5,6 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// Configuração explícita de CORS para aceitar qualquer origem com segurança
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -21,9 +20,9 @@ function generateSignature(appId, timestamp, payload, secret) {
   return crypto.createHash('sha256').update(baseStr).digest('hex');
 }
 
-async function shopeeFetch(query, appId, secret) {
+async function shopeeFetch(query, variables, appId, secret) {
   const timestamp = Math.floor(Date.now() / 1000);
-  const payload = JSON.stringify({ query });
+  const payload = JSON.stringify({ query, variables });
   const signature = generateSignature(appId, timestamp, payload, secret);
 
   const response = await fetch(SHOPEE_API_URL, {
@@ -41,7 +40,7 @@ async function shopeeFetch(query, appId, secret) {
   try {
     data = JSON.parse(text);
   } catch (e) {
-    throw new Error('Resposta inválida da Shopee: ' + text.slice(0, 200));
+    throw new Error('Resposta inválida: ' + text.slice(0, 200));
   }
 
   if (data.errors && data.errors.length > 0) {
@@ -51,7 +50,7 @@ async function shopeeFetch(query, appId, secret) {
   return data.data;
 }
 
-// Endpoint: Conversões (Extração Máxima de Dados)
+// Endpoint: Conversões (Versão Simplificada que Funciona na Shopee BR)
 app.post('/api/shopee/conversions', async (req, res) => {
   try {
     const { startDate, endDate, appId, secret } = req.body;
@@ -60,79 +59,54 @@ app.post('/api/shopee/conversions', async (req, res) => {
     const startTs = Math.floor(new Date(startDate).getTime() / 1000);
     const endTs   = Math.floor(new Date(endDate).getTime() / 1000);
 
-    console.log(`[Proxy] Coletando Conversões: ${startDate} → ${endDate}`);
+    console.log(`[Proxy] Buscando conversões: ${startDate} → ${endDate}`);
 
-    let allNodes = [];
-    let currentPage = 1;
-    let hasNextPage = true;
-
-    while (hasNextPage) {
-      console.log(`[Proxy] Buscando página de conversões: ${currentPage}...`);
-      
-      const query = `{
+    // Query purista, apenas com os campos aprovados para o BR, usando o limit para tentar trazer 100 registros de uma vez.
+    const query = `
+      query ($purchaseTimeStart: Int64, $purchaseTimeEnd: Int64) {
         conversionReport(
-          page: ${currentPage},
           limit: 100,
-          purchaseTimeStart: ${startTs},
-          purchaseTimeEnd: ${endTs}
+          purchaseTimeStart: $purchaseTimeStart,
+          purchaseTimeEnd: $purchaseTimeEnd
         ) {
           nodes {
             purchaseTime
             clickTime
-            completeTime
             conversionId
             conversionStatus
             totalCommission
             sellerCommission
-            shopeeCommission
-            extInfo
-            currency
-            matchingType
-            salesVolume
-          }
-          pageInfo {
-            page
-            hasNextPage
           }
         }
-      }`;
-
-      const data = await shopeeFetch(query, appId, secret);
-      const report = data?.conversionReport;
-      const nodes = report?.nodes || [];
-
-      allNodes = allNodes.concat(nodes);
-      hasNextPage = report?.pageInfo?.hasNextPage || false;
-      
-      if (hasNextPage) {
-        currentPage++;
       }
-    }
+    `;
 
-    const transformed = allNodes.map(node => ({
+    const data = await shopeeFetch(query, {
+      purchaseTimeStart: startTs,
+      purchaseTimeEnd: endTs,
+    }, appId, secret);
+
+    const nodes = data?.conversionReport?.nodes || [];
+
+    const transformed = nodes.map(node => ({
       purchaseTime:     node.purchaseTime,
       clickTime:        node.clickTime,
-      completeTime:     node.completeTime || null,
       conversionId:     node.conversionId,
       orderId:          node.conversionId,
       orderStatus:      node.conversionStatus || '',
-      currency:         node.currency || 'BRL',
-      matchingType:     node.matchingType || '',
-      salesVolume:      parseFloat(node.salesVolume || 0),
       totalCommission:  parseFloat(node.totalCommission  || 0),
       sellerCommission: parseFloat(node.sellerCommission || 0),
-      shopeeCommission: parseFloat(node.shopeeCommission || 0),
-      subId1:           node.extInfo || null,
+      subId1:           null,
       itemReportList: [{
         itemName:       'Venda Shopee',
-        itemPrice:      parseFloat(node.salesVolume || 0),
+        itemPrice:      parseFloat(node.totalCommission || 0) * 10, // Preço estimado
         qty:            1,
-        commission:     parseFloat(node.totalCommission || 0),
-        atributionType: node.matchingType || '',
+        commission:     parseFloat(node.totalCommission || node.sellerCommission || 0),
+        atributionType: '',
       }],
     }));
 
-    console.log(`[Proxy] Sucesso! Enviando ${transformed.length} registros para o front.`);
+    console.log(`[Proxy] Total de conversões extraídas: ${transformed.length}`);
     res.json({ success: true, data: transformed });
 
   } catch (error) {
@@ -141,18 +115,16 @@ app.post('/api/shopee/conversions', async (req, res) => {
   }
 });
 
-// Endpoint: Cliques (Respondendo vazio estruturado para o front-end não falhar)
+// Endpoint: Cliques
 app.post('/api/shopee/clicks', async (req, res) => {
-  console.log('[Proxy] Rota de cliques chamada — respondendo array vazio.');
-  res.json({ success: true, data: [] });
+  res.json({ success: true, data: [], message: "Cliques vazios passados por compatibilidade." });
 });
 
-// Health check corrigido
+// Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Inicialização do servidor corrigida
 app.listen(PORT, () => {
-  console.log(`🚀 Shopee Proxy ativo e rodando na porta ${PORT}`);
+  console.log(`🚀 Shopee Proxy rodando liso na porta ${PORT}`);
 });
