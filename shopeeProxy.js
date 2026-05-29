@@ -20,9 +20,12 @@ function generateSignature(appId, timestamp, payload, secret) {
   return crypto.createHash('sha256').update(baseStr).digest('hex');
 }
 
-async function shopeeFetch(query, variables, appId, secret) {
+async function shopeeFetch(query, appId, secret) {
   const timestamp = Math.floor(Date.now() / 1000);
-  const payload = JSON.stringify({ query, variables });
+  
+  // Como estamos injetando as variáveis direto na query, não precisamos enviar o objeto "variables"
+  const payload = JSON.stringify({ query });
+  
   const signature = generateSignature(appId, timestamp, payload, secret);
 
   const response = await fetch(SHOPEE_API_URL, {
@@ -50,41 +53,40 @@ async function shopeeFetch(query, variables, appId, secret) {
   return data.data;
 }
 
-// Endpoint: Conversões (Versão Simplificada que Funciona na Shopee BR)
+// Endpoint: Conversões (Livre do "wrong type")
 app.post('/api/shopee/conversions', async (req, res) => {
   try {
     const { startDate, endDate, appId, secret } = req.body;
     if (!appId || !secret) return res.status(400).json({ success: false, error: 'appId e secret são obrigatórios' });
 
-    const startTs = Math.floor(new Date(startDate).getTime() / 1000);
-    const endTs   = Math.floor(new Date(endDate).getTime() / 1000);
+    // Garantimos que o timestamp gerado seja estritamente um número inteiro base 10
+    const startTs = parseInt(Math.floor(new Date(startDate).getTime() / 1000), 10);
+    const endTs   = parseInt(Math.floor(new Date(endDate).getTime() / 1000), 10);
 
-    console.log(`[Proxy] Buscando conversões: ${startDate} → ${endDate}`);
+    console.log(`[Proxy] Buscando conversões: ${startDate} (${startTs}) → ${endDate} (${endTs})`);
 
-    // Query purista, apenas com os campos aprovados para o BR, usando o limit para tentar trazer 100 registros de uma vez.
-    const query = `
-      query ($purchaseTimeStart: Int64, $purchaseTimeEnd: Int64) {
-        conversionReport(
-          limit: 100,
-          purchaseTimeStart: $purchaseTimeStart,
-          purchaseTimeEnd: $purchaseTimeEnd
-        ) {
-          nodes {
-            purchaseTime
-            clickTime
-            conversionId
-            conversionStatus
-            totalCommission
-            sellerCommission
-          }
+    // A mágica: Colocamos os números DIRETAMENTE na string da query GraphQL,
+    // sem usar o mecanismo de variáveis do GraphQL (ex: $purchaseTimeStart),
+    // o que evita totalmente o erro "wrong type" da API da Shopee.
+    const query = `{
+      conversionReport(
+        limit: 100,
+        purchaseTimeStart: ${startTs},
+        purchaseTimeEnd: ${endTs}
+      ) {
+        nodes {
+          purchaseTime
+          clickTime
+          conversionId
+          conversionStatus
+          totalCommission
+          sellerCommission
         }
       }
-    `;
+    }`;
 
-    const data = await shopeeFetch(query, {
-      purchaseTimeStart: startTs,
-      purchaseTimeEnd: endTs,
-    }, appId, secret);
+    // Chamamos a Shopee mandando apenas a Query crua
+    const data = await shopeeFetch(query, appId, secret);
 
     const nodes = data?.conversionReport?.nodes || [];
 
@@ -99,7 +101,7 @@ app.post('/api/shopee/conversions', async (req, res) => {
       subId1:           null,
       itemReportList: [{
         itemName:       'Venda Shopee',
-        itemPrice:      parseFloat(node.totalCommission || 0) * 10, // Preço estimado
+        itemPrice:      parseFloat(node.totalCommission || 0) * 10,
         qty:            1,
         commission:     parseFloat(node.totalCommission || node.sellerCommission || 0),
         atributionType: '',
