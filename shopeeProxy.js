@@ -15,12 +15,14 @@ function generateSignature(appId, timestamp, payload, secret) {
   return crypto.createHash('sha256').update(baseStr).digest('hex');
 }
 
-async function shopeeFetch(query, variables, appId, secret) {
+async function shopeeFetch(query, appId, secret) {
   const timestamp = Math.floor(Date.now() / 1000);
-  const payload = JSON.stringify({ query, variables });
+  // Sem variáveis — timestamps inline na query
+  const payload = JSON.stringify({ query });
   const signature = generateSignature(appId, timestamp, payload, secret);
 
   console.log('[Proxy] Chamando API Shopee...');
+  console.log('[Proxy] Query:', query.trim().slice(0, 200));
 
   const response = await fetch(SHOPEE_API_URL, {
     method: 'POST',
@@ -55,39 +57,34 @@ app.post('/api/shopee/conversions', async (req, res) => {
     const { startDate, endDate, appId, secret } = req.body;
     if (!appId || !secret) return res.status(400).json({ success: false, error: 'appId e secret são obrigatórios' });
 
-    const startTs = parseInt(Math.floor(new Date(startDate).getTime() / 1000));
-    const endTs   = parseInt(Math.floor(new Date(endDate).getTime() / 1000));
+    const startTs = Math.floor(new Date(startDate).getTime() / 1000);
+    const endTs   = Math.floor(new Date(endDate).getTime() / 1000);
 
     console.log(`[Proxy] Conversões: ${startDate} → ${endDate}`);
     console.log(`[Proxy] Timestamps: ${startTs} → ${endTs}`);
 
-    const query = `
-      query ($purchaseTimeStart: Int64, $purchaseTimeEnd: Int64) {
-        conversionReport(
-          purchaseTimeStart: $purchaseTimeStart,
-          purchaseTimeEnd: $purchaseTimeEnd
-        ) {
-          nodes {
-            purchaseTime
-            clickTime
-            conversionId
-            conversionStatus
-            totalCommission
-            sellerCommission
-          }
-          pageInfo {
-            page
-            hasNextPage
-          }
+    // Timestamps inline na query (sem variáveis) para evitar problema de tipo Int64
+    const query = `{
+      conversionReport(
+        purchaseTimeStart: ${startTs},
+        purchaseTimeEnd: ${endTs}
+      ) {
+        nodes {
+          purchaseTime
+          clickTime
+          conversionId
+          conversionStatus
+          totalCommission
+          sellerCommission
+        }
+        pageInfo {
+          page
+          hasNextPage
         }
       }
-    `;
+    }`;
 
-    const data = await shopeeFetch(query, {
-      purchaseTimeStart: startTs,
-      purchaseTimeEnd: endTs,
-    }, appId, secret);
-
+    const data = await shopeeFetch(query, appId, secret);
     const nodes = data?.conversionReport?.nodes || [];
 
     const transformed = nodes.map(node => ({
@@ -118,53 +115,10 @@ app.post('/api/shopee/conversions', async (req, res) => {
   }
 });
 
-// Endpoint: Cliques
+// Endpoint: Cliques — API Shopee BR não suporta clickReport
 app.post('/api/shopee/clicks', async (req, res) => {
-  try {
-    const { startDate, endDate, appId, secret } = req.body;
-    if (!appId || !secret) return res.status(400).json({ success: false, error: 'appId e secret são obrigatórios' });
-
-    const startTs = parseInt(Math.floor(new Date(startDate).getTime() / 1000));
-    const endTs   = parseInt(Math.floor(new Date(endDate).getTime() / 1000));
-
-    console.log(`[Proxy] Cliques: ${startDate} → ${endDate}`);
-
-    const query = `
-      query ($clickTimeStart: Int64, $clickTimeEnd: Int64) {
-        clickReport(
-          clickTimeStart: $clickTimeStart,
-          clickTimeEnd: $clickTimeEnd
-        ) {
-          nodes {
-            clickTime
-            subId1
-          }
-          pageInfo {
-            page
-            hasNextPage
-          }
-        }
-      }
-    `;
-
-    const data = await shopeeFetch(query, {
-      clickTimeStart: startTs,
-      clickTimeEnd: endTs,
-    }, appId, secret);
-
-    const nodes = data?.clickReport?.nodes || [];
-
-    const transformed = nodes.map(node => ({
-      clickTime: node.clickTime,
-      subId1:    node.subId1 || null,
-    }));
-
-    console.log(`[Proxy] Total cliques: ${transformed.length}`);
-    res.json({ success: true, data: transformed });
-  } catch (error) {
-    console.error('[Proxy] Erro cliques:', error.message);
-    res.json({ success: true, data: [], warning: error.message });
-  }
+  console.log('[Proxy] clickReport não disponível na API Shopee BR — retornando vazio');
+  res.json({ success: true, data: [] });
 });
 
 // Health check
