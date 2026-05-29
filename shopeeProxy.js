@@ -1,4 +1,4 @@
-const express = require('express');
+const express = require('express');const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 
@@ -33,7 +33,7 @@ async function shopeeFetch(query, variables, appId, secret) {
 
   const text = await response.text();
   console.log('[Proxy] Status:', response.status);
-  
+
   let data;
   try {
     data = JSON.parse(text);
@@ -48,23 +48,22 @@ async function shopeeFetch(query, variables, appId, secret) {
   return data.data;
 }
 
-// Endpoint: Conversões
+// Endpoint: Conversões (Ajustado conforme o Schema Real da Shopee)
 app.post('/api/shopee/conversions', async (req, res) => {
   try {
-    // Adicionado "page" vindo do req.body (padrão 1 se o front não enviar)
-    const { startDate, endDate, appId, secret, page = 1 } = req.body;
+    const { startDate, endDate, appId, secret } = req.body;
     if (!appId || !secret) return res.status(400).json({ success: false, error: 'appId e secret são obrigatórios' });
 
+    // Mantendo como inteiros puros para o mapeamento Int64 do GraphQL
     const startTs = Math.floor(new Date(startDate).getTime() / 1000);
     const endTs   = Math.floor(new Date(endDate).getTime() / 1000);
 
-    console.log(`[Proxy] Conversões: ${startDate} → ${endDate} (Página: ${page})`);
+    console.log(`[Proxy] Conversões: ${startDate} → ${endDate}`);
 
-    // Ajustado tipos para Int e adicionado o parâmetro page exigido pela Shopee
+    // Removido o argumento "page" e revertido estritamente para Int64
     const query = `
-      query ($page: Int!, $purchaseTimeStart: Int, $purchaseTimeEnd: Int) {
+      query ($purchaseTimeStart: Int64, $purchaseTimeEnd: Int64) {
         conversionReport(
-          page: $page,
           purchaseTimeStart: $purchaseTimeStart,
           purchaseTimeEnd: $purchaseTimeEnd
         ) {
@@ -85,13 +84,13 @@ app.post('/api/shopee/conversions', async (req, res) => {
     `;
 
     const data = await shopeeFetch(query, {
-      page: parseInt(page),
       purchaseTimeStart: startTs,
       purchaseTimeEnd: endTs,
     }, appId, secret);
 
     const nodes = data?.conversionReport?.nodes || [];
 
+    // Mapeamento reconstrói o itemReportList exigido pelo seu front-end da Vercel
     const transformed = nodes.map(node => ({
       purchaseTime:     node.purchaseTime,
       clickTime:        node.clickTime,
@@ -110,7 +109,7 @@ app.post('/api/shopee/conversions', async (req, res) => {
       }],
     }));
 
-    console.log(`[Proxy] Total conversões retornadas: ${transformed.length}`);
+    console.log(`[Proxy] Total conversões mapeadas: ${transformed.length}`);
     res.json({ success: true, data: transformed });
   } catch (error) {
     console.error('[Proxy] Erro conversões:', error.message);
@@ -118,22 +117,21 @@ app.post('/api/shopee/conversions', async (req, res) => {
   }
 });
 
-// Endpoint: Cliques
+// Endpoint: Cliques (Ajustado conforme o Schema Real da Shopee)
 app.post('/api/shopee/clicks', async (req, res) => {
   try {
-    const { startDate, endDate, appId, secret, page = 1 } = req.body;
+    const { startDate, endDate, appId, secret } = req.body;
     if (!appId || !secret) return res.status(400).json({ success: false, error: 'appId e secret são obrigatórios' });
 
     const startTs = Math.floor(new Date(startDate).getTime() / 1000);
     const endTs   = Math.floor(new Date(endDate).getTime() / 1000);
 
-    console.log(`[Proxy] Cliques: ${startDate} → ${endDate} (Página: ${page})`);
+    console.log(`[Proxy] Cliques: ${startDate} → ${endDate}`);
 
-    // Ajustado tipos para Int e adicionado o parâmetro page exigido pela Shopee
+    // Revertido estritamente para Int64 e sem o argumento page
     const query = `
-      query ($page: Int!, $clickTimeStart: Int, $clickTimeEnd: Int) {
+      query ($clickTimeStart: Int64, $clickTimeEnd: Int64) {
         clickReport(
-          page: $page,
           clickTimeStart: $clickTimeStart,
           clickTimeEnd: $clickTimeEnd
         ) {
@@ -150,7 +148,6 @@ app.post('/api/shopee/clicks', async (req, res) => {
     `;
 
     const data = await shopeeFetch(query, {
-      page: parseInt(page),
       clickTimeStart: startTs,
       clickTimeEnd: endTs,
     }, appId, secret);
@@ -162,7 +159,7 @@ app.post('/api/shopee/clicks', async (req, res) => {
       subId1:    node.subId1 || null,
     }));
 
-    console.log(`[Proxy] Total cliques retornados: ${transformed.length}`);
+    console.log(`[Proxy] Total cliques mapeados: ${transformed.length}`);
     res.json({ success: true, data: transformed });
   } catch (error) {
     console.error('[Proxy] Erro cliques:', error.message);
