@@ -33,6 +33,7 @@ async function shopeeFetch(query, variables, appId, secret) {
 
   const text = await response.text();
   console.log('[Proxy] Status:', response.status);
+  console.log('[Proxy] Resposta:', text.slice(0, 1000));
 
   let data;
   try {
@@ -54,10 +55,11 @@ app.post('/api/shopee/conversions', async (req, res) => {
     const { startDate, endDate, appId, secret } = req.body;
     if (!appId || !secret) return res.status(400).json({ success: false, error: 'appId e secret são obrigatórios' });
 
-    const startTs = Math.floor(new Date(startDate).getTime() / 1000);
-    const endTs   = Math.floor(new Date(endDate).getTime() / 1000);
+    const startTs = parseInt(Math.floor(new Date(startDate).getTime() / 1000));
+    const endTs   = parseInt(Math.floor(new Date(endDate).getTime() / 1000));
 
     console.log(`[Proxy] Conversões: ${startDate} → ${endDate}`);
+    console.log(`[Proxy] Timestamps: ${startTs} → ${endTs}`);
 
     const query = `
       query ($purchaseTimeStart: Int64, $purchaseTimeEnd: Int64) {
@@ -106,7 +108,9 @@ app.post('/api/shopee/conversions', async (req, res) => {
       }],
     }));
 
-    console.log(`[Proxy] Total conversões mapeadas: ${transformed.length}`);
+    console.log(`[Proxy] Total conversões: ${transformed.length}`);
+    if (transformed.length > 0) console.log('[Proxy] Exemplo:', JSON.stringify(transformed[0], null, 2));
+
     res.json({ success: true, data: transformed });
   } catch (error) {
     console.error('[Proxy] Erro conversões:', error.message);
@@ -120,8 +124,8 @@ app.post('/api/shopee/clicks', async (req, res) => {
     const { startDate, endDate, appId, secret } = req.body;
     if (!appId || !secret) return res.status(400).json({ success: false, error: 'appId e secret são obrigatórios' });
 
-    const startTs = Math.floor(new Date(startDate).getTime() / 1000);
-    const endTs   = Math.floor(new Date(endDate).getTime() / 1000);
+    const startTs = parseInt(Math.floor(new Date(startDate).getTime() / 1000));
+    const endTs   = parseInt(Math.floor(new Date(endDate).getTime() / 1000));
 
     console.log(`[Proxy] Cliques: ${startDate} → ${endDate}`);
 
@@ -155,7 +159,7 @@ app.post('/api/shopee/clicks', async (req, res) => {
       subId1:    node.subId1 || null,
     }));
 
-    console.log(`[Proxy] Total cliques mapeados: ${transformed.length}`);
+    console.log(`[Proxy] Total cliques: ${transformed.length}`);
     res.json({ success: true, data: transformed });
   } catch (error) {
     console.error('[Proxy] Erro cliques:', error.message);
