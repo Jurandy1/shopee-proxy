@@ -49,16 +49,17 @@ async function shopeeFetch(query, variables, appId, secret) {
   return data.data;
 }
 
-// Endpoint: Conversões — campos mínimos confirmados pelo schema real da Shopee BR
+// Endpoint: Conversões
 app.post('/api/shopee/conversions', async (req, res) => {
   try {
     const { startDate, endDate, appId, secret } = req.body;
     if (!appId || !secret) return res.status(400).json({ success: false, error: 'appId e secret são obrigatórios' });
 
-    const startTs = Math.floor(new Date(startDate).getTime() / 1000);
-    const endTs   = Math.floor(new Date(endDate).getTime() / 1000);
+    const startTs = parseInt(Math.floor(new Date(startDate).getTime() / 1000));
+    const endTs   = parseInt(Math.floor(new Date(endDate).getTime() / 1000));
 
     console.log(`[Proxy] Conversões: ${startDate} → ${endDate}`);
+    console.log(`[Proxy] Timestamps: ${startTs} → ${endTs}`);
 
     const query = `
       query ($purchaseTimeStart: Int64, $purchaseTimeEnd: Int64) {
@@ -82,10 +83,13 @@ app.post('/api/shopee/conversions', async (req, res) => {
       }
     `;
 
-    const data = await shopeeFetch(query, { purchaseTimeStart: startTs, purchaseTimeEnd: endTs }, appId, secret);
+    const data = await shopeeFetch(query, {
+      purchaseTimeStart: startTs,
+      purchaseTimeEnd: endTs,
+    }, appId, secret);
+
     const nodes = data?.conversionReport?.nodes || [];
 
-    // Sem itemReportList disponível na API BR — criamos item sintético com totalCommission
     const transformed = nodes.map(node => ({
       purchaseTime:     node.purchaseTime,
       clickTime:        node.clickTime,
@@ -120,8 +124,10 @@ app.post('/api/shopee/clicks', async (req, res) => {
     const { startDate, endDate, appId, secret } = req.body;
     if (!appId || !secret) return res.status(400).json({ success: false, error: 'appId e secret são obrigatórios' });
 
-    const startTs = Math.floor(new Date(startDate).getTime() / 1000);
-    const endTs   = Math.floor(new Date(endDate).getTime() / 1000);
+    const startTs = parseInt(Math.floor(new Date(startDate).getTime() / 1000));
+    const endTs   = parseInt(Math.floor(new Date(endDate).getTime() / 1000));
+
+    console.log(`[Proxy] Cliques: ${startDate} → ${endDate}`);
 
     const query = `
       query ($clickTimeStart: Int64, $clickTimeEnd: Int64) {
@@ -141,7 +147,11 @@ app.post('/api/shopee/clicks', async (req, res) => {
       }
     `;
 
-    const data = await shopeeFetch(query, { clickTimeStart: startTs, clickTimeEnd: endTs }, appId, secret);
+    const data = await shopeeFetch(query, {
+      clickTimeStart: startTs,
+      clickTimeEnd: endTs,
+    }, appId, secret);
+
     const nodes = data?.clickReport?.nodes || [];
 
     const transformed = nodes.map(node => ({
